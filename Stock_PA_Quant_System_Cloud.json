@@ -1,0 +1,265 @@
+{
+  "name": "Stock_PA_Quant_System_Cloud",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// 1. 取得所有輸入資料 (處理 n8n 多 items 情況)\nconst inputItems = items; \n\n// 2. 數據清洗：提取收盤價並確保數值化 (相容 Close 或 close)\nconst rawData = inputItems.map(item => ({\n    close: parseFloat(item.json.close || item.json.Close || 0)\n})).filter(d => d.close > 0);\n\n// 3. 安全檢查：如果數據太少則跳出\nif (rawData.length < 20) {\n    return { json: { score: 0, light: \"⬜ 灰燈\", status: \"數據量不足(需至少20筆)\" } };\n}\n\n// 4. 計算 5MA 並定義多空區間 (Zone)\nlet processedData = rawData.map((d, index) => {\n    if (index < 4) return { ...d, ma5: null };\n    const last5 = rawData.slice(index - 4, index + 1);\n    const ma5 = last5.reduce((sum, item) => sum + item.close, 0) / 5;\n    return { \n        ...d, \n        ma5: ma5,\n        zone: d.close > ma5 ? 'BULL' : 'BEAR'\n    };\n}).filter(d => d.ma5 !== null);\n\n// 5. 提取波段極值 (Peak & Trough)\nlet peaks = [];\nlet troughs = [];\nlet currentSegment = { zone: '', values: [] };\n\nprocessedData.forEach(d => {\n    if (d.zone !== currentSegment.zone) {\n        if (currentSegment.values.length > 0) {\n            if (currentSegment.zone === 'BULL') {\n                peaks.push(Math.max(...currentSegment.values));\n            } else {\n                troughs.push(Math.min(...currentSegment.values));\n            }\n        }\n        currentSegment = { zone: d.zone, values: [d.close] };\n    } else {\n        currentSegment.values.push(d.close);\n    }\n});\n\n// 6. 趨勢結構判定 (比對最後兩組極值)\nconst n = peaks.length - 1;\nconst m = troughs.length - 1;\n\n// 判斷是否具備足夠結構進行趨勢分析\nif (n < 1 || m < 1) {\n    return { json: { score: 0, light: \"⬜ 灰燈\", status: \"結構尚未成形\" } };\n}\n\nconst isHigherLow = troughs[m] > troughs[m-1];\nconst isHigherHigh = peaks[n] > peaks[n-1];\nconst isLowerLow = troughs[m] < troughs[m-1];\nconst isLowerHigh = peaks[n] < peaks[n-1];\n\nconst currentClose = processedData[processedData.length - 1].close;\nconst currentMA5 = processedData[processedData.length - 1].ma5;\nconst lastPeak = peaks[n];\nconst lastTrough = troughs[m];\n\nlet result = { score: 0, color: \"⬜ 灰燈\", status: \"盤整期\" };\n\n// 7. 燈號評分邏輯 (完全遵照 MD 規格書)\nif (isHigherLow && isHigherHigh) { // 多頭趨勢\n    if (currentClose > lastPeak) {\n        result = { score: 3, color: \"🔴 紅燈\", status: \"多頭趨勢 - 突破中\" };\n    } else if (currentClose >= currentMA5) {\n        result = { score: 2, color: \"🟠 橙燈\", status: \"多頭趨勢 - 強勢整理\" };\n    } else {\n        result = { score: 1, color: \"🟡 黃燈\", status: \"多頭趨勢 - 轉弱回檔\" };\n    }\n} else if (isLowerLow && isLowerHigh) { // 空頭趨勢\n    if (currentClose < lastTrough) {\n        result = { score: -3, color: \"🟢 綠燈\", status: \"空頭趨勢 - 破底中\" };\n    } else if (currentClose <= currentMA5) {\n        result = { score: -2, color: \"🔵 藍燈\", status: \"空頭趨勢 - 弱勢反彈\" };\n    } else {\n        result = { score: -1, color: \"🟣 紫燈\", status: \"空頭趨勢 - 強勢反彈\" };\n    }\n}\n\n// 8. 最終輸出\nreturn {\n    json: {\n        score: result.score,\n        light: result.color,\n        status: result.status,\n        details: {\n            close: currentClose,\n            ma5: currentMA5.toFixed(2),\n            peak_n: lastPeak,\n            trough_n: lastTrough,\n            structure: `HL:${isHigherLow}/HH:${isHigherHigh}`\n        }\n    }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -16
+      ],
+      "id": "024807ec-8108-46b2-9f99-af6a6e52b82b",
+      "name": "Short-term Analyst"
+    },
+    {
+      "parameters": {
+        "jsCode": "const data = items.map(i => i.json);\nconst len = data.length; // 補上這行定義，告訴電腦 len 是什麼\nconst returns = [];\n\n// 1. 計算每日報酬率\nfor (let i = 1; i < len; i++) {\n  returns.push((data[i].close - data[i-1].close) / data[i-1].close);\n}\n\n// 2. 計算平均回報與標準差 (年化夏普值)\nconst avgReturn = returns.reduce((a, b) => a + b) / returns.length;\nconst stdDev = Math.sqrt(returns.map(x => Math.pow(x - avgReturn, 2)).reduce((a, b) => a + b) / returns.length);\nconst annualizedSharpe = (avgReturn / stdDev) * Math.sqrt(252); \n\nreturn [{\n  json: {\n    analysis_type: \"長期體質分析\",\n    sharpe_ratio: annualizedSharpe.toFixed(2),\n    // 這裡現在可以正確讀取 len 了\n    annual_return: ( (data[len-1].close - data[0].close) / data[0].close * 100 ).toFixed(2) + \"%\",\n    quality: annualizedSharpe > 1 ? \"優秀\" : \"一般\"\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        -208
+      ],
+      "id": "70b949b7-4e5f-40b5-8d94-39519ef6519e",
+      "name": "Long-term Analyst"
+    },
+    {
+      "parameters": {
+        "jsCode": "const result = items[0].json.chart.result[0];\nconst timestamps = result.timestamp;\nconst closePrices = result.indicators.quote[0].close;\n\nreturn timestamps.map((ts, index) => ({\n  json: {\n    date: new Date(ts * 1000).toISOString().split('T')[0],\n    close: closePrices[index] ? parseFloat(closePrices[index].toFixed(2)) : null\n  }\n})).filter(item => item.json.close !== null);"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -496,
+        -112
+      ],
+      "id": "9ece4b02-4280-4f78-83b0-9c3a68dded12",
+      "name": "Data Cleaner "
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -16,
+        -112
+      ],
+      "id": "b03e387d-bd8b-48d2-9ade-320175fa680b",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/push",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ZkF6EvltdK3dm1tkiqelywa/g6eD0BInotezJy9yXrb80BGWwUY8ELIK7+0vdHsLUH0/B2jnPnu0lhB0IclagOWWDUlIObgtEKQFZcbHJK3Sok7JbP5kqM7KuVxWZkIVcjdBQ+FVkXaqHG6feJiB/wdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"to\": \"{{ $node[\"Webhook\"].json.body.events[0].source.userId }}\",\n  \"messages\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"📊 {{ $json.symbol }} 量化分析報告\\n--------------------------\\n📈 長期指標：\\n- 品質：{{ $json.quality }}\\n- 夏普率：{{ $json.sharpe_ratio }}\\n- 年度回報：{{ $json.annual_return }}\\n\\n🚦 短期技術結構：\\n- 目前燈號：{{ $json.light }}\\n- 狀態判定：{{ $json.status }}\\n- 分數：{{ $json.score }}\\n\\n💰 當前價格：${{ $json.details.close }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        160,
+        -112
+      ],
+      "id": "44764436-a559-4227-b72d-7ca837b976a9",
+      "name": "Line Bot Send Messages"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/push",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer ZkF6EvltdK3dm1tkiqelywa/g6eD0BInotezJy9yXrb80BGWwUY8ELIK7+0vdHsLUH0/B2jnPnu0lhB0IclagOWWDUlIObgtEKQFZcbHJK3Sok7JbP5kqM7KuVxWZkIVcjdBQ+FVkXaqHG6feJiB/wdB04t89/1O/w1cDnyilFU="
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"to\": \"{{ $node[\"Webhook\"].json.body.events[0].source.userId }}\",\n  \"messages\": [\n    {\n      \"type\": \"text\",\n      \"text\": \"🚨 米奇林系統警報！\\n-------------------------\\n❌ 錯誤原因：抓取 Yahoo Finance 資料失敗。\\n🔍 檢查點：請確認網路連線、Yahoo 網址是否變更，或 Docker 伺服器狀態。\\n⏰ 報警時間：{{ $now.format('YYYY-MM-DD HH:mm:ss') }}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -496,
+        80
+      ],
+      "id": "2a757b1d-c680-4fca-97aa-d70432503090",
+      "name": "Line Bot Send ErrorMessages"
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/v8/finance/chart/{{ $json.body.events[0].message.text }}?range=1y&interval=1d",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -704,
+        -32
+      ],
+      "id": "46a8b69a-6c85-42d2-93f7-d60ac3bdc75e",
+      "name": "DownLoad StockData",
+      "retryOnFail": true,
+      "waitBetweenTries": 5000,
+      "notesInFlow": true,
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "704c0bad-30ae-4344-8f9e-cc00f7954fe3",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -928,
+        -32
+      ],
+      "id": "8362d498-deb3-4a91-8120-d7f2b5571d31",
+      "name": "Webhook",
+      "webhookId": "704c0bad-30ae-4344-8f9e-cc00f7954fe3"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Data Cleaner ": {
+      "main": [
+        [
+          {
+            "node": "Short-term Analyst",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Long-term Analyst",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Short-term Analyst": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Long-term Analyst": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Line Bot Send Messages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DownLoad StockData": {
+      "main": [
+        [
+          {
+            "node": "Data Cleaner ",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Line Bot Send ErrorMessages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Line Bot Send ErrorMessages": {
+      "main": [
+        []
+      ]
+    },
+    "Line Bot Send Messages": {
+      "main": [
+        []
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "DownLoad StockData",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "3259a8d1-8c29-4946-8d3b-0ff7b99599d2",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0daed4fd096ee931bff7e8b484bfab52dea6201b45f10ee5f6859b64788f4785"
+  },
+  "id": "nV9Wthr26clznkUH",
+  "tags": []
+}
